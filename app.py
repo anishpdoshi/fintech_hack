@@ -7,6 +7,7 @@ import numpy as np
 from fpdf import FPDF
 from io import StringIO
 import io
+import markdown2
 import matplotlib.pyplot as plt
 from unstructured.partition.pdf import partition_pdf
 from unstructured.partition.api import partition_multiple_via_api
@@ -21,6 +22,7 @@ from query_llm import query_llm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Preformatted
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+import queries
 
 import functools
 import nltk
@@ -35,6 +37,9 @@ def get_pdf_paths():
         "/Users/apdoshi/mountain_view_pdfs/extracted_pdfs/Fiscal Year 2022-2023 Budget Extracted.pdf"
     ])
 
+def get_rag_paths():
+    return [val.split('/')[-1] for val in get_pdf_paths()]
+
 def adapt_tables_to_common_schema(fname_to_tables):
     table_query = ''
     for fname, tables in fname_to_tables.items():
@@ -44,7 +49,7 @@ def adapt_tables_to_common_schema(fname_to_tables):
         table_query += '\n'.join(table.text for table in tables)
 
     query = f"""
-    Given the following table, give me a dataset summarizing the revenue, expenses, and net income
+    Given the following table info, give me a dataset summarizing the revenue, expenses, and net income
     broken down by granularity. For example, if the table is broken down by department, give me a dataset
     with the following columns: department, revenue, expenses, net income. Format the output in CSV format under the 
     header at the bottom of the prompt.
@@ -57,9 +62,6 @@ def adapt_tables_to_common_schema(fname_to_tables):
 
 @functools.lru_cache()
 def query_pdfs_for_tables(pdf_paths):
-    # loader = DirectoryLoader(DATA_PATH,
-    #                          glob='*.pdf',
-    #                          loader_cls=PyPDFLoader)
     res = {}
     for fname in pdf_paths:
         elements = partition_pdf(filename=fname,
@@ -105,6 +107,16 @@ def get_insights(fname_to_tables):
         method='openai'
     )
 
+def get_query_code(fname_to_tables, extracted_table_info):
+    table_query = ''
+    for fname, tables in fname_to_tables.items():
+        table_query += (fname.split('/')[-1] if '/' in fname else fname)
+        table_query += '\n\n~~~~~~~~~~~~~~~\n\n'
+        table_query += '\n'.join(table.text for table in tables)
+
+    query = queries.gen_create_visualization_code(table_query, extracted_table_info)
+    return query_llm(query, method="openai")
+
 
 # Function to plot Revenue and Expenses per Department
 def plot_revenue_expenses(df):
@@ -135,6 +147,9 @@ def create_download_link(val, filename):
     b64 = base64.b64encode(val)  # val looks like b'...'
     return f'<a href="data:application/octet-stream;base64,{b64.decode()}" download="{filename}.pdf">Download file</a>'
 
+def markdown_to_html(markdown_text):
+    # Sample Markdown text
+    return markdown2.markdown(markdown_text)
 
 if __name__ == "__main__":
     docs = query_pdfs_for_tables(get_pdf_paths())
@@ -143,55 +158,61 @@ if __name__ == "__main__":
 
     df = tables_as_data_frame(res)
 
+    st.title('Financial Overview by Department')
+    
+    st.text_input("Enter your query here (e.g. 'What is information I need to price bonds accurately?)'")
+
+    st.title("PDFs Sourced From")
+    st.text(
+        str(get_rag_paths())
+    )
+
     # df.style.highlight_max(axis=0)
     
+    st.title("Insights Data")
     # Sort and select the top 10 categories based on user's choice
     sort_option = st.radio("Sort by:", ('Revenue', 'Expenses'))
     df_sorted = df.sort_values(by=sort_option, ascending=False).head(10)
 
 
-    st.title('Financial Overview by Department')
+    
     # Display DataFrame
     st.dataframe(df_sorted)
 
     st.markdown(insights_text)
 
-    st.text_input("Enter your query here (e.g. 'What is information I need to price bonds accurately?)'")
 
     #  Generate and display plot
     fig = plot_revenue_expenses(df_sorted)
     st.pyplot(fig)
 
-    export_as_pdf = st.button("Export Report")
+    # Export functionality as before
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    plot_image = Image(buf, width=6*inch, height=4*inch)  # Adjust size as needed
 
-    if export_as_pdf:
-        # Export functionality as before
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png')
-        buf.seek(0)
-        plot_image = Image(buf, width=6*inch, height=4*inch)  # Adjust size as needed
+    pdf_filename = 'report.pdf'
+    doc = SimpleDocTemplate(pdf_filename)
+    styles = getSampleStyleSheet()
 
-        pdf_filename = 'report.pdf'
-        doc = SimpleDocTemplate(pdf_filename)
-        styles = getSampleStyleSheet()
+    csv_style = ParagraphStyle(name='CSVStyle', parent=styles['Code'], fontSize=8, leading=8.5)
+    story = [
+        Paragraph("Financial Overview by Department (Top 10)", styles["h1"]),
+        Spacer(1, 0.2 * inch),
+        Preformatted(df_sorted.to_string(index=False), csv_style),
+        Spacer(1, 0.2 * inch),
+        Paragraph(markdown_to_html(insights_text), styles["Normal"]),
+        Spacer(1, 0.2 * inch),
+        plot_image
+    ]
 
-        csv_style = ParagraphStyle(name='CSVStyle', parent=styles['Code'], fontSize=8, leading=8.5)
-        story = [
-            Paragraph("Financial Overview by Department (Top 10)", styles["h1"]),
-            Spacer(1, 0.2 * inch),
-            Preformatted(df_sorted.to_string(index=False), csv_style),
-            Spacer(1, 0.2 * inch),
-            Paragraph(insights_text, styles["Normal"]),
-            Spacer(1, 0.2 * inch),
-            plot_image
-        ]
+    doc.build(story)
 
-        doc.build(story)
-
-        with open(pdf_filename, "rb") as file:
-            st.download_button(
-                label="Download PDF Report",
-                data=file,
-                file_name=pdf_filename,
-                mime="application/pdf"
-            )
+    with open(pdf_filename, "rb") as file:
+        st.download_button(
+            label="Download PDF Report",
+            data=file,
+            file_name=pdf_filename,
+            mime="application/pdf"
+        )
