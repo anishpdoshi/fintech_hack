@@ -3,9 +3,11 @@ import os, requests
 import lmql
 import json
 from openai import OpenAI
+import functools
 
 client = OpenAI()
 
+@functools.lru_cache()
 def query_llm(prompt, method="together", model="togethercomputer/llama-2-70b-chat"):
     if method == "openai":
         url = "https://api.openai.com/v1/chat/completions"
@@ -51,5 +53,4 @@ def query_llm(prompt, method="together", model="togethercomputer/llama-2-70b-cha
         response = requests.post(url, json=data, headers=headers)
         json_resp = response.json()
         return json_resp['output']['choices'][0]['text']
-
-
+    
